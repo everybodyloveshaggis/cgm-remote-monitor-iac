@@ -104,3 +104,6 @@ This deletes the EC2 instance, Elastic IP, security group, and the key pair
 in AWS (the local `.pem` file itself isn't auto-deleted from disk — remove
 it manually if you want it fully gone). Your data is safe in Atlas either
 way, since it's a separate service outside this stack.
+
+
+ssh -i nightscout-key.pem ubuntu@ec2-13-43-129-190.eu-west-2.compute.amazonaws.com
