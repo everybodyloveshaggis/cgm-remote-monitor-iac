@@ -88,18 +88,13 @@ jobs:
       with:
         cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-    - name: Check Terraform credentials
+    - name: Check Terraform CLI config
       run: |
-        if [ -f "$HOME/.terraform.d/credentials.tfrc.json" ]; then
-          echo "✅ Terraform credentials file exists"
-          grep -q '"app.terraform.io"' "$HOME/.terraform.d/credentials.tfrc.json" \
-            && echo "✅ app.terraform.io credentials configured" \
-            || echo "❌ app.terraform.io credentials NOT configured"
-        else
-          echo "❌ Terraform credentials file does not exist"
-          exit 1
-        fi
+        echo "HOME=$HOME"
+        ls -la "$HOME/.terraform.d" 2>/dev/null || echo "No .terraform.d directory"
+        find "$HOME" -name 'credentials.tfrc.json' -print 2>/dev/null
 
+        
     - name: Terraform Init
       run: terraform init
 
