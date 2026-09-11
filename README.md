@@ -1,109 +1,68 @@
-# Nightscout on AWS — Terraform
+# Nightscout on AWS � Terraform
 
-Provisions the EC2 side of a Nightscout deployment: instance, Elastic IP, and a
-security group allowing SSH/HTTP/HTTPS. Uses MongoDB Atlas (free tier) as the
-database — this Terraform does not create a database, since Atlas isn't AWS.
+A small, always-on Nightscout deployment: ARM-based EC2, MongoDB Atlas, Caddy, and a stable Elastic IP. The instance runs Docker itself; you do not install or operate Docker manually.
 
-## Before you run this
+## Why this remains EC2, not ECS/Fargate
 
-1. **Set up your MongoDB Atlas cluster** and grab the connection string — you'll
-   need it after the instance boots (see step 3 below).
-2. Have AWS credentials configured locally (`aws configure`, or environment
-   variables / SSO profile that Terraform's AWS provider can pick up).
+For one always-on Nightscout instance in London, `t4g.micro` is the better value. It has 2 vCPUs and 1 GiB RAM and currently costs about $6.86/month on demand before storage and public IPv4. The smallest Fargate task (0.25 vCPU / 0.5 GiB) is around $0.012/hour (about $8.76/month) before public IPv4, logs, and data transfer; it also has only half the memory. An ECS service needs an ALB, NAT, or DNS automation to provide a dependable HTTPS endpoint, which adds cost and complexity.
 
-The SSH key pair is created for you by Terraform — no manual step needed. A
-private key file (`<key_name>.pem`, e.g. `nightscout-key.pem`) is written
-into this directory when you apply. Keep it safe and don't commit it to git.
+The current ARM64 Nightscout image supports this instance architecture. ECS becomes attractive if you need managed rolling deploys, multiple services, or automatic scaling�not for this single low-cost server.
 
-## Files
+## What Terraform creates
 
-- `main.tf` — provider, AMI lookup, security group, EC2 instance, Elastic IP
-- `variables.tf` — inputs (region, instance type, key pair name, your IP for SSH, domain)
-- `outputs.tf` — prints the Elastic IP and SSH command after apply
-- `user_data.sh.tpl` — cloud-init script that installs Docker and writes the
-  Nightscout `docker-compose.yml` + `Caddyfile` on first boot
+- A `t4g.micro` Ubuntu 22.04 ARM instance with a 10 GiB encrypted gp3 root disk.
+- Elastic IP and public HTTP/HTTPS only. SSH is deliberately not exposed.
+- An instance role with only Session Manager access and `GetSecretValue` on the single Nightscout secret.
+- IMDSv2-required instance metadata.
+- Docker, Nightscout, and Caddy provisioned at first boot.
 
-## Usage
+## Required secret
+
+Create (or update) the `nightscout-secrets` secret in AWS Secrets Manager with this JSON. The instance fetches it at boot using its IAM role; the values do not enter Terraform state or user data.
+
+```json
+{
+  "MONGO_CONNECTION": "mongodb+srv://...",
+  "API_SECRET": "a-long-random-secret"
+}
+```
+
+Use a long randomly generated `API_SECRET`, for example `openssl rand -hex 32`. The secret name can be overridden with `nightscout_secret_name`.
+
+Allow the instance Elastic IP in MongoDB Atlas network access. Do not put either value in `terraform.tfvars`.
+
+## Deploy
+
+Set your DNS A record to the future `elastic_ip` output, then apply:
 
 ```bash
 terraform init
-
-terraform plan \
-  -var="ssh_allowed_cidr=YOUR.IP.ADDR.ESS/32" \
-  -var="domain_name=nightscout.yourdomain.com"
-
-terraform apply \
-  -var="ssh_allowed_cidr=YOUR.IP.ADDR.ESS/32" \
-  -var="domain_name=nightscout.yourdomain.com"
+terraform apply -var='domain_name=nightscout.example.com'
 ```
 
-`key_name` defaults to `nightscout-key` — only pass `-var="key_name=..."` if
-you want a different name.
+Caddy requests a certificate after the DNS record resolves and ports 80/443 are reachable. Without `domain_name`, the service is available only over HTTP at `nightscout_url`; use a proper domain for HTTPS.
 
-### Using terraform.tfvars
+To administer the server, use the `ssm_start_session_command` output (AWS CLI and the Session Manager plugin are required locally). Useful commands once connected:
 
-Instead of passing `-var` flags every time, put your values in a
-`terraform.tfvars` file in this directory:
-
-```hcl
-ssh_allowed_cidr = "YOUR.IP.ADDR.ESS/32"
-domain_name      = "yoursubdomain.duckdns.org"
+```bash
+cd /home/ubuntu/nightscout
+docker compose ps
+docker compose logs -f
+docker compose pull && docker compose up -d
 ```
 
-Terraform picks this file up automatically — no flags needed for
-`terraform plan` / `terraform apply` once it exists. Don't commit it to git
-if `ssh_allowed_cidr` reveals anything you'd rather keep private.
+## Existing deployment migration
 
-**Important caveat:** `domain_name` is only read once, by the cloud-init
-script that runs on first boot. Changing it in `terraform.tfvars` and
-re-applying won't update an already-running instance — Terraform has no way
-to know the Caddyfile needs editing, since it only wrote that file at boot
-time, not since. If you change your domain after the fact, either edit
-`~/nightscout/Caddyfile` by hand and `docker compose restart caddy` (no
-Terraform involved), or taint the instance to force a full rebuild — but a
-rebuild means redoing your Atlas connection string and API secret from
-scratch, so the manual edit is usually less disruptive.
+Applying this revision removes the SSH key pair and port-22 ingress and replaces the EC2 instance because its bootstrap configuration changes. Atlas data is external and remains intact, but expect a short outage and Caddy to obtain a fresh certificate. Confirm the secret JSON and Atlas allow-list before applying.
 
-### No domain? Use AWS's auto-generated hostname instead
+## Ongoing cost notes
 
-You don't need to buy a domain. AWS assigns every instance a public DNS
-hostname automatically (shown in the `public_dns` output, e.g.
-`ec2-3-8-45-201.compute-1.amazonaws.com`), and it stays stable since it's
-tied to the Elastic IP. Let's Encrypt will issue a real cert for it — it
-just needs the hostname to publicly resolve to your server, nothing more.
+A public IPv4 address is billed separately by AWS at $0.005/hour (about $3.65/month), whether it is an Elastic IP or an automatically assigned public IPv4. Monitor AWS Cost Explorer and Atlas usage; database and outbound-data charges are outside this Terraform stack.
 
-Because that hostname only exists once the Elastic IP is allocated, omit
-`domain_name` on `apply` and set it up manually afterward (see step 5 below)
-rather than trying to pass it up front.
-
-## After `terraform apply`
-
-1. If you used a real `domain_name`, point its A record at the `elastic_ip`
-   output value. If you didn't, skip to step 5.
-2. SSH in using the `ssh_command` output.
-3. Edit the compose file with your real Atlas connection string and a random API secret:
-   ```bash
-   nano ~/nightscout/docker-compose.yml
-   # set MONGO_CONNECTION and API_SECRET
-   cd ~/nightscout
-   docker compose up -d
-   ```
-4. In Atlas, restrict Network Access to just this instance's Elastic IP.
-5. **If you didn't set `domain_name`:** edit `~/nightscout/Caddyfile` to use
-   the `public_dns` output value in place of `:80`, then
-   `docker compose restart caddy`. Caddy fetches the cert on the next request.
-6. Visit `https://your-domain` or `https://<public_dns>`.
-
-## Cleaning up
+## Destroy
 
 ```bash
 terraform destroy
 ```
 
-This deletes the EC2 instance, Elastic IP, security group, and the key pair
-in AWS (the local `.pem` file itself isn't auto-deleted from disk — remove
-it manually if you want it fully gone). Your data is safe in Atlas either
-way, since it's a separate service outside this stack.
-
-
-ssh -i nightscout-key.pem ubuntu@ec2-13-43-129-190.eu-west-2.compute.amazonaws.com
+This removes AWS resources created by the stack, not the Atlas database or Secrets Manager secret.

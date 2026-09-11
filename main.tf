@@ -22,19 +22,13 @@ provider "aws" {
 }
 
 data "aws_secretsmanager_secret" "nightscout" {
-  name = "nightscout-secrets"
+  name = var.nightscout_secret_name
 }
-
-data "aws_secretsmanager_secret_version" "nightscout" {
-  secret_id = data.aws_secretsmanager_secret.nightscout.id
-}
-
 
 # Latest Ubuntu 22.04 LTS ARM64 AMI
 data "aws_ami" "ubuntu" {
   most_recent = true
-
-  owners = ["099720109477"]
+  owners      = ["099720109477"]
 
   filter {
     name   = "name"
@@ -52,47 +46,17 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-# ---------------------------------------------------------
-# SSH
-# ---------------------------------------------------------
-
-resource "aws_key_pair" "nightscout" {
-  key_name   = var.key_name
-  public_key = local.ssh_public_key
-
-  tags = {
-    Name = "nightscout"
-  }
-}
-
-# ---------------------------------------------------------
-# Security Group
-# ---------------------------------------------------------
-
+# Public ingress only. Administration uses AWS Systems Manager Session Manager.
 resource "aws_security_group" "nightscout" {
   name        = "nightscout-sg"
-  description = "Allow SSH, HTTP and HTTPS for Nightscout"
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-
-    cidr_blocks = [
-      local.ssh_allowed_cidr
-    ]
-  }
+  description = "Allow public HTTP and HTTPS for Nightscout"
 
   ingress {
     description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-
-    cidr_blocks = [
-      "0.0.0.0/0"
-    ]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
@@ -100,10 +64,7 @@ resource "aws_security_group" "nightscout" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-
-    cidr_blocks = [
-      "0.0.0.0/0"
-    ]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -118,45 +79,82 @@ resource "aws_security_group" "nightscout" {
   }
 }
 
-# ---------------------------------------------------------
-# EC2
-# ---------------------------------------------------------
+data "aws_iam_policy_document" "nightscout_assume_role" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "nightscout" {
+  name               = "nightscout-instance"
+  assume_role_policy = data.aws_iam_policy_document.nightscout_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.nightscout.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+data "aws_iam_policy_document" "nightscout_secret" {
+  statement {
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [data.aws_secretsmanager_secret.nightscout.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "nightscout_secret" {
+  name   = "read-nightscout-runtime-secret"
+  role   = aws_iam_role.nightscout.id
+  policy = data.aws_iam_policy_document.nightscout_secret.json
+}
+
+resource "aws_iam_instance_profile" "nightscout" {
+  name = "nightscout-instance"
+  role = aws_iam_role.nightscout.name
+}
 
 resource "aws_instance" "nightscout" {
   ami           = data.aws_ami.ubuntu.id
   instance_type = var.instance_type
 
-  key_name = aws_key_pair.nightscout.key_name
-
-  vpc_security_group_ids = [
-    aws_security_group.nightscout.id
-  ]
+  vpc_security_group_ids = [aws_security_group.nightscout.id]
+  iam_instance_profile   = aws_iam_instance_profile.nightscout.name
 
   root_block_device {
     volume_size = var.volume_size_gb
     volume_type = "gp3"
-
-    encrypted = true
+    encrypted   = true
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
-    domain_name = local.domain_name
+    aws_region        = var.aws_region
+    domain_name       = var.domain_name
+    nightscout_secret = data.aws_secretsmanager_secret.nightscout.arn
   })
 
   user_data_replace_on_change = true
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
 
   tags = {
     Name = "nightscout"
   }
 }
 
-# ---------------------------------------------------------
-# Elastic IP
-# ---------------------------------------------------------
-
 resource "aws_eip" "nightscout" {
-  domain = "vpc"
-
+  domain   = "vpc"
   instance = aws_instance.nightscout.id
 
   tags = {
