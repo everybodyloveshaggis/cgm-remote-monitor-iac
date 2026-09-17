@@ -22,6 +22,12 @@ variable "nightscout_secret_name" {
   default     = "nightscout-secrets"
 }
 
+variable "dynatrace_secret_name" {
+  description = "Secrets Manager secret containing DYNATRACE_ENV_URL and DYNATRACE_PLATFORM_TOKEN"
+  type        = string
+  default     = "dynatrace-secrets"
+}
+
 variable "volume_size_gb" {
   description = "Root EBS volume size in GB"
   type        = number

@@ -8,6 +8,44 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ca-certificates curl jq awscli
 
+
+# Install Dynatrace OneAgent before starting the application containers.
+for attempt in {1..12}; do
+  if secret_json="$(aws secretsmanager get-secret-value \
+    --region '${aws_region}' \
+    --secret-id '${dynatrace_secret}' \
+    --query SecretString \
+    --output text)"; then
+    break
+  fi
+  if [ "$attempt" -eq 12 ]; then
+    echo "Unable to retrieve Dynatrace secret after 12 attempts" >&2
+    exit 1
+  fi
+  sleep 5
+done
+DT_ENVIRONMENT="$(jq -er '.DYNATRACE_ENV_URL // .dynatrace_env_url' <<<"$secret_json")"
+DT_PLATFORM_TOKEN="$(jq -er '.DYNATRACE_PLATFORM_TOKEN // .dynatrace_platform_token' <<<"$secret_json")"
+unset secret_json
+
+# This stack uses Ubuntu ARM64. "latest" follows the environment's OneAgent
+# target version. Platform tokens require fleet-management:oneagents:download.
+oneagent_installer="$(mktemp /tmp/dynatrace-oneagent.XXXXXX.sh)"
+trap 'rm -f "$oneagent_installer"' EXIT
+echo "Downloading the latest Dynatrace OneAgent for ARM64..."
+curl --fail --silent --show-error --location --retry 5 --retry-delay 5 \
+  --header "Authorization: Bearer $DT_PLATFORM_TOKEN" \
+  --output "$oneagent_installer" \
+  "$${DT_ENVIRONMENT%/}/api/v1/deployment/installer/agent/unix/default/latest?arch=arm&flavor=default"
+unset DT_PLATFORM_TOKEN DT_ENVIRONMENT
+/bin/sh "$oneagent_installer"
+rm -f "$oneagent_installer"
+trap - EXIT
+unset oneagent_installer
+
+
+# Install Docker and Docker Compose
+
 curl -fsSL https://get.docker.com | sh
 apt-get install -y docker-compose-plugin
 systemctl enable --now docker

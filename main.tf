@@ -25,6 +25,21 @@ data "aws_secretsmanager_secret" "nightscout" {
   name = var.nightscout_secret_name
 }
 
+data "aws_secretsmanager_secret" "dynatrace" {
+  name = var.dynatrace_secret_name
+}
+
+data "aws_iam_policy_document" "nightscout_secret" {
+  statement {
+    effect  = "Allow"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      data.aws_secretsmanager_secret.nightscout.arn,
+      data.aws_secretsmanager_secret.dynatrace.arn,
+    ]
+  }
+}
+
 # Latest Ubuntu 22.04 LTS ARM64 AMI
 data "aws_ami" "ubuntu" {
   most_recent = true
@@ -101,14 +116,6 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-data "aws_iam_policy_document" "nightscout_secret" {
-  statement {
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [data.aws_secretsmanager_secret.nightscout.arn]
-  }
-}
-
 resource "aws_iam_role_policy" "nightscout_secret" {
   name   = "read-nightscout-runtime-secret"
   role   = aws_iam_role.nightscout.id
@@ -137,6 +144,7 @@ resource "aws_instance" "nightscout" {
     aws_region        = var.aws_region
     domain_name       = var.domain_name
     nightscout_secret = data.aws_secretsmanager_secret.nightscout.arn
+    dynatrace_secret  = data.aws_secretsmanager_secret.dynatrace.arn
   })
 
   user_data_replace_on_change = true
