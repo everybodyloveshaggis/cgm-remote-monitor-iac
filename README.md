@@ -12,9 +12,9 @@ The current ARM64 Nightscout image supports this instance architecture. ECS beco
 
 - A `t4g.micro` Ubuntu 22.04 ARM instance with a 10 GiB encrypted gp3 root disk.
 - Elastic IP and public HTTP/HTTPS only. SSH is deliberately not exposed.
-- An instance role with only Session Manager access and `GetSecretValue` on the single Nightscout secret.
+- An instance role with only Session Manager access and `GetSecretValue` on the Nightscout and Dynatrace secrets.
 - IMDSv2-required instance metadata.
-- Docker, Nightscout, and Caddy provisioned at first boot.
+- Dynatrace OneAgent, Docker, Nightscout, and Caddy provisioned at first boot.
 
 ## Required secret
 
@@ -30,6 +30,19 @@ Create (or update) the `nightscout-secrets` secret in AWS Secrets Manager with t
 Use a long randomly generated `API_SECRET`, for example `openssl rand -hex 32`. The secret name can be overridden with `nightscout_secret_name`.
 
 Allow the instance Elastic IP in MongoDB Atlas network access. Do not put either value in `terraform.tfvars`.
+
+Create a second secret, `dynatrace-secrets` (override with `dynatrace_secret_name`), containing:
+
+```json
+{
+  "DYNATRACE_ENV_URL": "https://your-environment-id.live.dynatrace.com",
+  "DYNATRACE_PLATFORM_TOKEN": "your-platform-token"
+}
+```
+
+Use the environment API URL and a platform token with `fleet-management:oneagents:download` scope. The bootstrap downloads the ARM64 installer from Dynatrace's [latest OneAgent endpoint](https://docs.dynatrace.com/docs/dynatrace-api/environment-api/deployment/oneagent/download-oneagent-latest), which follows the target version configured in your environment's OneAgent update settings, and installs it before Docker starts. Lowercase secret keys are also accepted.
+
+Installation runs on the instance's first boot, not every reboot. A failed download or installation stops bootstrap; see `/var/log/nightscout-user-data.log` for details. Secrets are fetched at runtime and do not enter Terraform state or user data.
 
 ## Deploy
 
